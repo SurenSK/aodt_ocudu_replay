@@ -1,0 +1,80 @@
+# OCUDU gNB (CU+DU+L1 in one process) with its own ZMQ radio: no RU and no fronthaul; the channel engine sits between
+# the gNB's transmit and receive sockets and applies a static or time-varying (AODT) channel.
+# Cell: TDD n78 20 MHz 2x2 30 kHz, no core, one test-mode UE at rank 2, metrics on.
+cu_cp:
+  amf:
+    addr: 127.0.0.1
+    bind_addr: 127.0.0.1
+    no_core: true
+
+ru_sdr:                       # the ZMQ radio: tools/channel_engine.py is the other end of these sockets
+  device_driver: zmq
+  device_args: tx_port=tcp://*:5000,tx_port=tcp://*:5002,rx_port=tcp://127.0.0.1:5001,rx_port=tcp://127.0.0.1:5003
+  srate: 23.04
+  tx_gain: 0
+  rx_gain: 0
+  clock: default
+  sync: default
+
+cell_cfg:
+  dl_arfcn: 628032
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 1
+  pci: 1
+  nof_antennas_dl: 2
+  nof_antennas_ul: 2
+  prach:
+    prach_config_index: 159
+    prach_root_sequence_index: 1
+    zero_correlation_zone: 0
+    prach_frequency_start: 0
+  tdd_ul_dl_cfg:
+    dl_ul_tx_period: 5
+    nof_dl_slots: 3
+    nof_dl_symbols: 10
+    nof_ul_slots: 1
+    nof_ul_symbols: 2
+
+expert_phy:
+  allow_request_on_empty_uplink_slot: true
+  max_proc_delay: 10
+  pusch_dec_max_iterations: 15
+
+test_mode:
+  test_ue:
+    rnti: 0x44
+    ri: 2        # two layers so the two antenna ports carry different content (at rank 1 both ports carry the same layer)
+    cqi: 15
+    nof_ues: 1
+    pusch_active: false      # replay loop: no uplink decoding needed (saves the single PHY thread's time)
+    pdsch_active: true
+
+metrics:
+  enable_log: true
+  layers:
+    enable_ru: true
+    enable_sched: true
+  periodicity:
+    du_report_period: 1000
+
+log:
+  filename: /dev/null   # rewritten per run by tools/zmq_loop.sh
+  all_level: warning
+  ofh_level: info
+
+# CPU layout (container cpuset 40-55,104-119; hyperthread siblings n and n+64): gNB main pool and PHY worker on 40-47,
+# radio and lower-PHY threads on 50-54, the channel engine's serving thread on 55. One thread per core: with
+# isolcpus=domain the kernel does not balance inside the set, so a shared core starves one of the threads.
+expert_execution:
+  affinities:
+    main_pool_cpus: 40-47     # 6 pool threads + the single non-realtime phy_worker (ZMQ forces sequential PHY) each get a core
+    main_pool_pinning: round-robin
+  cell_affinities:            # SDR RU unit: per-cell lower PHY + ZMQ radio threads (one per core; isolcpus does no balancing)
+    - ru_cpus: 50-54
+      ru_pinning: round-robin
+  threads:
+    main_pool:
+      nof_threads: 6
